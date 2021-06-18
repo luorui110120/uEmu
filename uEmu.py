@@ -1253,6 +1253,7 @@ class uEmuUnicornEngine(object):
         self.map_memory(address, size)
         self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * UEMU_CONFIG.UnicornPageSize)
         self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), bytesbuf)
+        return True
     def map_file(self,address, size, filepath):
         mem_addr = address
         mem_size = size
