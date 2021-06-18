@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Author: By 空道
+# Created on 10:19 2015/3/6
+
 #
 #  uEmu.py
 #  Micro Emulator
@@ -678,6 +683,47 @@ class uEmuCpuContextView(simplecustviewer_t):
 
 # === uEmuMemoryView
 
+class MyuEmuMemoryRangeDialog(Form):
+    def __init__(self):
+        Form.__init__(self, r"""STARTITEM {id:mem_addr}
+BUTTON YES* Add
+BUTTON CANCEL Cancel
+Show Memory Range
+Specify start address and size of new memory range.
+{form_change_cb}
+<##Address\::{mem_addr}> <##Size\::{mem_size}>
+<##Hex\::{iHex}>
+<#Select open#Browse\::{iFileOpen}>
+map type:
+<Empty:{rEmpty}>
+<Hex:{rHex}>
+<File:{rFile}>{cGroup2}>
+<##Comment\::{mem_cmnt}>
+""", {
+        'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
+        'mem_size': Form.NumericInput(swidth=10, tp=Form.FT_HEX),
+        'iHex': Form.StringInput(),
+        'iFileOpen': Form.FileInput(swidth=41, open=True),
+        'cGroup2': Form.RadGroupControl(("rEmpty", "rHex", "rFile")),
+        'mem_cmnt': Form.StringInput(swidth=41),
+        'form_change_cb': Form.FormChangeCb(self.OnFormChange)
+        })
+    def OnFormChange(self, fid):
+        if(-1 == fid):
+            self.EnableField(self.iHex,False)
+            self.EnableField(self.iFileOpen,False)
+        if(fid == self.cGroup2.id):
+            if(0 == self.GetControlValue(self.cGroup2)):
+                self.EnableField(self.iHex,False)
+                self.EnableField(self.iFileOpen,False)
+            if(1 == self.GetControlValue(self.cGroup2)):
+                self.EnableField(self.iHex,True)
+                self.EnableField(self.iFileOpen,False)
+            if(2 == self.GetControlValue(self.cGroup2)):
+                self.EnableField(self.iHex,False)
+                self.EnableField(self.iFileOpen,True)
+        return 1
+
 class uEmuMemoryRangeDialog(Form):
     def __init__(self):
         Form.__init__(self, r"""STARTITEM {id:mem_addr}
@@ -693,6 +739,19 @@ Specify start address and size of new memory range.
         'mem_cmnt': Form.StringInput(swidth=41)
         })
 
+class uEmuMemoryPatchDialog(Form):
+    def __init__(self):
+        Form.__init__(self, r"""STARTITEM {id:mem_addr}
+BUTTON YES* OK
+BUTTON CANCEL Cancel
+Patch Memory
+Patch Memory data
+<##Address\::{mem_addr}>
+<##hex\::{iHex}>
+""", {
+        'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
+        'iHex': Form.StringInput(swidth=41)
+        })
 class uEmuMemoryView(simplecustviewer_t):
     def __init__(self, owner, address, size):
         super(uEmuMemoryView, self).__init__()
@@ -1103,6 +1162,9 @@ class uEmuUnicornEngine(object):
             "mipsle"    : [ UC_MIPS_REG_PC,     UC_ARCH_MIPS,   UC_MODE_MIPS32  | UC_MODE_LITTLE_ENDIAN ],
         }
         arch = UEMU_HELPERS.get_arch()
+        if(len(arch) <3):
+            return
+        #print('arch', arch)
 
         self.uc_reg_pc, self.uc_arch, self.uc_mode = uc_setup[arch]
         uemu_log("Unicorn version [ %s ]" % (unicorn.__version__))
@@ -1186,7 +1248,46 @@ class uEmuUnicornEngine(object):
     def map_empty(self, address, size):
         self.map_memory(address, size)
         self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * UEMU_CONFIG.UnicornPageSize)
+    
+    def map_hex(self, address, size, bytesbuf):
+        self.map_memory(address, size)
+        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * UEMU_CONFIG.UnicornPageSize)
+        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), bytesbuf)
+    def map_file(self,address, size, filepath):
+        mem_addr = address
+        mem_size = size
+        with open(filepath, 'rb') as file:
+            file.seek(0, 2)
+            file_size = file.tell()
 
+            # check if file is big enough
+            if file_size > size:
+                mem_size = file_size
+                #print('set size', hex(mem_size))
+                #file.close()
+                #return False
+
+            # validate range
+            # if address < UEMU_HELPERS.ALIGN_PAGE_DOWN(mem_addr):
+            #     return False
+            # if (address + size) > (mem_addr + mem_size):
+            #     return False
+
+            # read data from file
+            #file.seek(mem_offset, 0)
+            file.seek(0, 0)
+            data = file.read(file_size)
+            file.close()
+
+            try:
+                self.map_memory(mem_addr, mem_size)
+                self.mu.mem_write(mem_addr, data)
+            except UcError as e:
+                return 0
+
+            return mem_size
+
+        return 0
     def map_binary(self, address, size):
         binMapDlg = uEmuMapBinaryFileDialog(address)
         binMapDlg.Compile()
@@ -1606,7 +1707,6 @@ class uEmuExtensionHooks:
     emu_step = None
 
 class uEmuPlugin(plugin_t, UI_Hooks):
-
     popup_menu_hook = None
 
     flags = PLUGIN_HIDE
@@ -1624,9 +1724,9 @@ class uEmuPlugin(plugin_t, UI_Hooks):
     unicornEngine = None
 
     settings = {
-        "follow_pc"     : False,
-        "force_code"    : False,
-        "trace_inst"    : False,
+        "follow_pc"     : True,
+        "force_code"    : True,
+        "trace_inst"    : True,
         "lazy_mapping"  : False,
     }
 
@@ -1748,6 +1848,7 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         self.add_custom_menu()
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":jmp_pc",            self.jump_to_pc,            "Jump to PC",                 "Jump to PC",                "SHIFT+CTRL+ALT+J",     True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":cng_cpu",           self.change_cpu_context,    "Change CPU Context",         "Change CPU Context",        None,                   True    ))
+        self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":patch_mem",         self.patch_memory,          "Patch Memory",               "Patch Memory",              None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem("-",                                     self.do_nothing,            "",                           None,                        None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":ctl_view",          self.show_controls,         "Show Controls",              "Show Control Window",       None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":cpu_view",          self.show_cpu_context,      "Show CPU Context",           "Show CPU Registers",        None,                   True    ))
@@ -1964,8 +2065,73 @@ class uEmuPlugin(plugin_t, UI_Hooks):
             self.cpuExtContextView.SetContent(self.unicornEngine.pc, self.unicornEngine.mu)
             self.cpuExtContextView.Show()
             self.cpuExtContextView.Refresh()
-
-    def show_memory(self, address = 0, size = 16):
+    def refresh_all_memory_views(self):
+        # for memvies in self.memoryViews.values():
+        #     memvies.Refresh()
+        self.unicornEngine.owner.update_context(self.unicornEngine.pc, self.unicornEngine.mu)
+    def patch_memory(self, address = 0):
+        if not self.unicornEngine.is_active():
+            uemu_log("Emulator is not active")
+            return
+        memPatchDlg = uEmuMemoryPatchDialog()
+        memPatchDlg.Compile()
+        memPatchDlg.mem_addr.value = address
+        ok = memPatchDlg.Execute()
+        if ok == 1:
+            mem_addr = memPatchDlg.mem_addr.value
+            mem_hex = memPatchDlg.iHex.value
+            mem_hex = mem_hex.strip().replace(' ','').replace('\n','').replace('\r','').replace('\t','')
+            # def map_write(self, address, bytesbuf):
+            # self.mu.mem_write(address, bytesbuf)
+            self.unicornEngine.mu.mem_write(mem_addr, mem_hex.decode('hex'))
+            self.refresh_all_memory_views()
+    def show_memory(self, address = 0, size = 0x100):
+        if not self.unicornEngine.is_active():
+            uemu_log("Emulator is not active")
+            return
+        memRangeDlg = MyuEmuMemoryRangeDialog()
+        memRangeDlg.Compile()
+        memRangeDlg.mem_addr.value = address
+        memRangeDlg.mem_size.value = size
+        ok = memRangeDlg.Execute()
+        if ok == 1:
+            mem_addr = memRangeDlg.mem_addr.value
+            mem_size = memRangeDlg.mem_size.value
+            mem_cmnt = memRangeDlg.mem_cmnt.value
+            mem_type = memRangeDlg.cGroup2.value
+            mem_hex = memRangeDlg.iHex.value
+            mem_file_path = memRangeDlg.iFileOpen.value
+            #print("mem_type",mem_type)
+            #print("mem_file_path",mem_file_path)
+            if mem_addr not in self.memoryViews:
+                # if not self.unicornEngine.is_memory_mapped(mem_addr):
+                #     ok = IDAAPI_AskYN(1, "Memory [%X:%X] is not mapped!\nDo you want to map it?\n   YES - Load Binary\n   NO - Fill page with zeroes\n   Cancel - Close dialog" % (mem_addr, mem_addr + mem_size))
+                #     if ok == 0:
+                #         self.unicornEngine.map_empty(mem_addr, mem_size)
+                #     elif ok == 1:
+                #         if not self.unicornEngine.map_binary(mem_addr, mem_size):
+                #             return
+                #     else:
+                #         return
+                if not self.unicornEngine.is_memory_mapped(mem_addr):
+                    if(0 == mem_type):
+                        self.unicornEngine.map_empty(mem_addr, mem_size)
+                    if(1 == mem_type):
+                        ###处理不可见字符串
+                        mem_hex = mem_hex.strip().replace(' ','').replace('\n','').replace('\r','').replace('\t','')
+                        if not self.unicornEngine.map_hex(mem_addr, mem_size, mem_hex.decode('hex')):
+                            return 
+                    if(2 == mem_type):
+                        mem_size = self.unicornEngine.map_file(mem_addr, mem_size, mem_file_path)
+                        if(0 == mem_size):
+                            return
+                mem_cmnt = '0x%x %s'%(mem_addr,mem_cmnt)
+                self.memoryViews[mem_addr] = uEmuMemoryView(self, mem_addr, mem_size)
+                self.memoryViews[mem_addr].Create("uEmu Memory [ " + mem_cmnt + " ]")
+                self.memoryViews[mem_addr].SetContent(self.unicornEngine.mu)
+            self.memoryViews[mem_addr].Show()
+            self.memoryViews[mem_addr].Refresh()
+    def show_memory_old(self, address = 0, size = 16):
         if not self.unicornEngine.is_active():
             uemu_log("Emulator is not active")
             return
@@ -2070,8 +2236,8 @@ class uEmuPlugin(plugin_t, UI_Hooks):
 def PLUGIN_ENTRY():
     return uEmuPlugin()
 
-if UEMU_USE_AS_SCRIPT:
-    if __name__ == '__main__':
-        uEmu = uEmuPlugin()
-        uEmu.init()
-        uEmu.run()
+# if UEMU_USE_AS_SCRIPT:
+#     if __name__ == '__main__':
+#         uEmu = uEmuPlugin()
+#         uEmu.init()
+#         uEmu.run()
