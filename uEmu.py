@@ -752,6 +752,31 @@ Patch Memory data
         'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
         'iHex': Form.StringInput(swidth=41)
         })
+
+class uEmuSegSyncDialog(Form):
+    def __init__(self):
+        Form.__init__(self, r"""STARTITEM {id:mem_addr}
+BUTTON YES* OK
+BUTTON CANCEL Cancel
+Sync seg
+uemu memory Sync to ida seg
+<##Address(hex)\::{mem_addr}> <##Size(hex)\::{mem_size}>
+""", {
+        'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
+        'mem_size': Form.NumericInput(swidth=10, tp=Form.FT_HEX),
+        })
+class uEmuDumpMemoryDialog(Form):
+    def __init__(self):
+        Form.__init__(self, r"""STARTITEM {id:mem_addr}
+BUTTON YES* OK
+BUTTON CANCEL Cancel
+Dump uemu Memory
+Dump Memory to file
+<##Address(hex)\::{mem_addr}> <##Size(hex)\::{mem_size}>
+""", {
+        'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
+        'mem_size': Form.NumericInput(swidth=10, tp=Form.FT_HEX),
+        })
 class uEmuMemoryView(simplecustviewer_t):
     def __init__(self, owner, address, size):
         super(uEmuMemoryView, self).__init__()
@@ -944,12 +969,40 @@ class uEmuMappeduMemoryView(IDAAPI_Choose):
         self.items = memory
         self.icon = -1
         self.selcount = 0
-        self.popup_names = [ "", "Dump To File", "Show", "" ]
+        self.popup_names = [ "Sync Seg", "Dump To File", "Show", "" ]
         self.owner = owner
 
     def OnClose(self):
         pass
-
+    def OnInsertLine(self, n): # Sysc seg
+        address = self.items[n][0]
+        size = self.items[n][1] - self.items[n][0] + 1
+        if(not idc.isLoaded(address)):
+            address = -1
+        if(address >= 0) and ((self.items[n][1] + 1) > idc.SegEnd(address)):
+            size = idc.SegEnd(address) - address
+        memSyncSegDlg = uEmuSegSyncDialog()
+        memSyncSegDlg.Compile()
+        memSyncSegDlg.mem_addr.value = address
+        memSyncSegDlg.mem_size.value = size
+        ok = memSyncSegDlg.Execute()
+        if ok == 1:
+            address = memSyncSegDlg.mem_addr.value
+            size = memSyncSegDlg.mem_size.value
+            if(idc.isLoaded(address) and idc.isLoaded(address + size -1)):
+                address = -1
+                print('Sync addr:0x%x, size:0x%x'%(address,size))
+                mem_buf = self.owner.unicornEngine.get_mapped_bytes(address, size)
+                put_many_bytes(address, struct.pack("B"*len(mem_buf), *mem_buf))
+                refresh_idaview_anyway();
+            else:
+                print('error addr or size!!')
+            # outfile.seek(0, 0)
+            # outfile.write(self.owner.unicornEngine.get_mapped_bytes(address, size))
+            # outfile.close()
+        else:
+            print('cancele sync!!')
+        self.Refresh()
     def OnDeleteLine(self, n): # Save JSON
         filePath = IDAAPI_AskFile(1, "*.bin", "Dump memory")
         if filePath is not None:
@@ -1379,7 +1432,10 @@ class uEmuUnicornEngine(object):
                     overlap_end = True
                     tmp = memStart
                     break
-
+            # print('memStart:0x%x'%memStart)
+            # print('memEnd:0x%x'%memEnd)
+            # print('memPerm:0x%x'%memPerm)
+            # print(found,overlap_start,overlap_end)
             if found:               # already mapped
                 continue
             elif overlap_start:     # partial overlap (start)
@@ -1850,6 +1906,7 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":jmp_pc",            self.jump_to_pc,            "Jump to PC",                 "Jump to PC",                "SHIFT+CTRL+ALT+J",     True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":cng_cpu",           self.change_cpu_context,    "Change CPU Context",         "Change CPU Context",        None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":patch_mem",         self.patch_memory,          "Patch Memory",               "Patch Memory",              None,                   True    ))
+        self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":dump_mem",          self.dump_memory,           "Dump  Memory",               "Dump  Memory",              None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem("-",                                     self.do_nothing,            "",                           None,                        None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":ctl_view",          self.show_controls,         "Show Controls",              "Show Control Window",       None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":cpu_view",          self.show_cpu_context,      "Show CPU Context",           "Show CPU Registers",        None,                   True    ))
@@ -2070,6 +2127,22 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         # for memvies in self.memoryViews.values():
         #     memvies.Refresh()
         self.unicornEngine.owner.update_context(self.unicornEngine.pc, self.unicornEngine.mu)
+    def dump_memory(self, address = 0, size = 0):
+        memDumpDlg = uEmuDumpMemoryDialog()
+        memDumpDlg.Compile()
+        memDumpDlg.mem_addr.value = address
+        memDumpDlg.mem_size.value = size
+        ok = memDumpDlg.Execute()
+        if ok == 1:
+            address = memDumpDlg.mem_addr.value
+            size = memDumpDlg.mem_size.value
+            strpath=os.path.dirname(idc.GetIdbPath()) + os.sep + "%X-%X.Dump"%(address, address + size)
+            filePath = IDAAPI_AskFile(1,  strpath, "Dump uemu memory")
+            if filePath is not None:
+                with open(filePath, 'w') as outfile:
+                    outfile.seek(0, 0)
+                    outfile.write(self.unicornEngine.get_mapped_bytes(address, size))
+                    outfile.close()
     def patch_memory(self, address = 0):
         if not self.unicornEngine.is_active():
             uemu_log("Emulator is not active")
