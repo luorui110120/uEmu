@@ -2128,6 +2128,9 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         #     memvies.Refresh()
         self.unicornEngine.owner.update_context(self.unicornEngine.pc, self.unicornEngine.mu)
     def dump_memory(self, address = 0, size = 0):
+        if not self.unicornEngine.is_active():
+            uemu_log("Emulator is not active")
+            return
         memDumpDlg = uEmuDumpMemoryDialog()
         memDumpDlg.Compile()
         memDumpDlg.mem_addr.value = address
@@ -2143,6 +2146,8 @@ class uEmuPlugin(plugin_t, UI_Hooks):
                     outfile.seek(0, 0)
                     outfile.write(self.unicornEngine.get_mapped_bytes(address, size))
                     outfile.close()
+        else:
+            print('cancel dump!')
     def patch_memory(self, address = 0):
         if not self.unicornEngine.is_active():
             uemu_log("Emulator is not active")
