@@ -472,6 +472,24 @@ class UEMU_HELPERS:
         return registers_ext_format[arch]
 
     @staticmethod
+    def get_call_code(arch):
+        if arch.startswith("arm64"):
+            arch = "arm64"
+        elif arch.startswith("arm"):
+            arch = "arm"
+        elif arch.startswith("mips"):
+            arch = "mips"
+
+        call_code = {
+            "x64" : ['call'],
+            "x86" : ['call'],
+            "arm" : ['bl','bx'],
+            "arm64" : ['bl','bx'],
+            ####
+            "mips" : [],
+        }
+        return call_code[arch]
+    @staticmethod
     def is_thumb_ea(ea):
         def handler():
             if ph.id == PLFM_ARM and not ph.flag & PR_USE64:
@@ -1229,6 +1247,7 @@ class uEmuUnicornEngine(object):
         if(len(arch) <3):
             return
         #print('arch', arch)
+        self.lastRegValueDir={}
 
         self.uc_reg_pc, self.uc_arch, self.uc_mode = uc_setup[arch]
         uemu_log("Unicorn version [ %s ]" % (unicorn.__version__))
@@ -1469,10 +1488,29 @@ class uEmuUnicornEngine(object):
         if self.owner.ext_hooks.trace_log is not None:
             if self.owner.ext_hooks.trace_log(self.pc):
                 return
-
+        arch = UEMU_HELPERS.get_arch()
+        regvalues = ''
+        if arch != "":
+            regList = UEMU_HELPERS.get_register_map(arch)
+            retstr=''
+            if ph.flag & PR_USE64:
+                value_format = "%s:0x%.16X"
+            else:
+                value_format = "%s:0x%.8X,"
+            reg_cnt = len(regList)
+            for j in range(reg_cnt):
+                reg_label = regList[j][0]
+                reg_key = regList[j][1]
+                ###过滤 pc 寄存器
+                if(self.uc_reg_pc == reg_key):
+                    continue
+                currentValue = self.mu.reg_read(reg_key)
+                if ((not self.lastRegValueDir.has_key(reg_label)) or (currentValue != self.lastRegValueDir[reg_label])):
+                    self.lastRegValueDir[reg_label] = currentValue
+                    regvalues += value_format%(reg_label, currentValue)
         bytes = IDAAPI_GetBytes(self.pc, IDAAPI_NextHead(self.pc) - self.pc)
         bytes_hex = UEMU_HELPERS.bytes_to_str(bytes)
-        uemu_log("* TRACE<I> 0x%X | %-16s | %s" % (self.pc, bytes_hex, IDAAPI_GetDisasm(self.pc, 0)))
+        uemu_log("* TRACE<I> 0x%X | %-16s | %s | %s" % (self.pc, bytes_hex, IDAAPI_GetDisasm(self.pc, 0), regvalues))
 
     def hook_mem_access(self, uc, access, address, size, value, user_data):
         def bpt_sync_check():
@@ -1581,8 +1619,17 @@ class uEmuUnicornEngine(object):
         cpuContext = uEmuContextInitDialog(regs)
         ok = cpuContext.show()
         if ok:
+            
             for idx, val in enumerate(cpuContext.items[0:regs_len-1]):
                 self.mu.reg_write(reg_map[idx][1], int(val[1], 0))
+            if(self.pc != self.mu.reg_read(self.uc_reg_pc)):
+                IDAAPI_SetColor(self.pc, CIC_ITEM, UEMU_CONFIG.IDAViewColor_Reset)
+                self.pc = self.mu.reg_read(self.uc_reg_pc)
+                IDAAPI_SetColor(self.pc, CIC_ITEM, UEMU_CONFIG.IDAViewColor_PC)
+                if self.owner.trace_inst():
+                    self.trace_log()
+            
+            
             if self.extended:
                 for idx, val in enumerate(cpuContext.items[regs_len:]):
                     self.mu.reg_write(reg_ext_map[idx][1], int(val[1], 0))
@@ -1743,10 +1790,19 @@ class uEmuUnicornEngine(object):
         self.emuThread = threading.Thread(target=self.step_thread_main)
         self.emuRunning = True
         self.emuThread.start()
+    def isCallCode(self, str_code):
+        arch = UEMU_HELPERS.get_arch()
+        if arch != "":
+            call_List = UEMU_HELPERS.get_call_code(arch)
+            for call_code in call_List:
+                if (str_code.startswith(call_code.lower())):
+                    return True
+        return False
     def over(self):
         ####这里实现单步核心是过滤了一下 bl 和bx 这种arm 汇编指令的call函数
-        arm_code = IDAAPI_GetDisasm(self.pc, 0)[0:2].lower()
-        if((arm_code == 'bx') or (arm_code == 'bl')):
+        ###  这里需要扩展一些别的汇编,比如 x86 的call 等
+        arm_code = IDAAPI_GetDisasm(self.pc, 0).lower()
+        if(self.isCallCode(arm_code)):
             self.next_pc = IDAAPI_NextHead(self.pc)
             self.step(self.kStepCount_Run)
         else:
