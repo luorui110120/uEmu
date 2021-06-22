@@ -88,6 +88,7 @@ from unicorn.arm64_const import *
 from unicorn.mips_const import *
 from unicorn.x86_const import *
 
+
 # === Configuration
 
 class UEMU_CONFIG:
@@ -773,9 +774,13 @@ BUTTON CANCEL Cancel
 Dump uemu Memory
 Dump Memory to file
 <##Address(hex)\::{mem_addr}> <##Size(hex)\::{mem_size}>
+Dump type:
+<Print:{rPrint}>
+<File:{rFile}>{cGroup2}>
 """, {
         'mem_addr': Form.NumericInput(swidth=20, tp=Form.FT_HEX),
         'mem_size': Form.NumericInput(swidth=10, tp=Form.FT_HEX),
+        'cGroup2': Form.RadGroupControl(("rPrint","rFile")),
         })
 class uEmuMemoryView(simplecustviewer_t):
     def __init__(self, owner, address, size):
@@ -921,11 +926,13 @@ class uEmuControlView(PluginForm):
         btnStart = QPushButton("Start")
         btnRun = QPushButton("Run")
         btnStep = QPushButton("Step")
+        btnOver = QPushButton("Over")
         btnStop = QPushButton("Stop")
 
         btnStart.clicked.connect(self.OnEmuStart)
         btnRun.clicked.connect(self.OnEmuRun)
         btnStep.clicked.connect(self.OnEmuStep)
+        btnOver.clicked.connect(self.OnEmuOver)
         btnStop.clicked.connect(self.OnEmuStop)
 
         hbox = QHBoxLayout()
@@ -933,6 +940,7 @@ class uEmuControlView(PluginForm):
         hbox.addWidget(btnStart)
         hbox.addWidget(btnRun)
         hbox.addWidget(btnStep)
+        hbox.addWidget(btnOver)
         hbox.addWidget(btnStop)
 
         self.parent.setLayout(hbox)
@@ -945,6 +953,9 @@ class uEmuControlView(PluginForm):
 
     def OnEmuStep(self, code=0):
         self.owner.emu_step()
+    
+    def OnEmuOver(self, code=0):
+        self.owner.emu_over()
 
     def OnEmuStop(self, code=0):
         self.owner.emu_stop()
@@ -1584,6 +1595,8 @@ class uEmuUnicornEngine(object):
         self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, self.hook_mem_invalid)
         self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.hook_mem_access)
         self.pc = address
+        ### 获取下一条指令的地址
+        self.next_pc = None
 
         try:
             if self.init_cpu_context(address) == False:
@@ -1641,8 +1654,9 @@ class uEmuUnicornEngine(object):
             # ^^^
             def result_handler():
                 self.pc = self.mu.reg_read(self.uc_reg_pc)
-                if self.owner.trace_inst():
+                if self.owner.trace_inst() and ((self.next_pc == None) or (self.next_pc == self.pc)):
                     self.trace_log()
+                    
 
                 if not IDAAPI_IsCode(IDAAPI_GetFlags(self.pc)) and self.owner.force_code():
                     uemu_log("Creating code at 0x%X" % (self.pc))
@@ -1650,15 +1664,17 @@ class uEmuUnicornEngine(object):
                     IDAAPI_MakeCode(self.pc)
 
                 if self.emuStepCount != 1:
-                    if not self.is_breakpoint_reached(self.pc):
+                    if self.is_breakpoint_reached(self.pc):
+                        self.next_pc = None
+                        uemu_log("Breakpoint reached at 0x%X : %s" % (self.pc, UEMU_HELPERS.trim_spaces(IDAAPI_GetDisasm(self.pc, 0))))
+                    elif self.next_pc == self.pc:
+                        self.next_pc = None
+                    else:
                         if self.emuStepCount == self.kStepCount_Run:
                             self.step(self.kStepCount_Run)
                         else:
                             self.step(self.emuStepCount - 1)
                         return 1
-                    else:
-                        uemu_log("Breakpoint reached at 0x%X : %s" % (self.pc, UEMU_HELPERS.trim_spaces(IDAAPI_GetDisasm(self.pc, 0))))
-
                 if not self.emuRunning:
                     uemu_log("Emulation interrupted at 0x%X : %s" % (self.pc, UEMU_HELPERS.trim_spaces(IDAAPI_GetDisasm(self.pc, 0))))
 
@@ -1727,7 +1743,14 @@ class uEmuUnicornEngine(object):
         self.emuThread = threading.Thread(target=self.step_thread_main)
         self.emuRunning = True
         self.emuThread.start()
-
+    def over(self):
+        ####这里实现单步核心是过滤了一下 bl 和bx 这种arm 汇编指令的call函数
+        arm_code = IDAAPI_GetDisasm(self.pc, 0)[0:2].lower()
+        if((arm_code == 'bx') or (arm_code == 'bl')):
+            self.next_pc = IDAAPI_NextHead(self.pc)
+            self.step(self.kStepCount_Run)
+        else:
+            self.step()
     def run(self):
         self.step(self.kStepCount_Run)
 
@@ -1899,6 +1922,7 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":start",             self.emu_start,             "Start",                      "Start emulation",           None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":run",               self.emu_run,               "Run",                        "Run",                       None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":step",              self.emu_step,              "Step",                       "Step to next instruction",  "SHIFT+CTRL+ALT+S",     True    ))
+        self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":over",              self.emu_over,              "Over",                       "Step over",                 None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":stop",              self.emu_stop,              "Stop",                       "Stop emulation",            None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem(self.plugin_name + ":reset",             self.emu_reset,             "Reset",                      "Reset emulation",           None,                   True    ))
         self.MENU_ITEMS.append(UEMU_HELPERS.MenuItem("-",                                     self.do_nothing,            "",                           None,                        None,                   True    ))
@@ -2042,6 +2066,16 @@ class uEmuPlugin(plugin_t, UI_Hooks):
                 count = 1
 
         self.unicornEngine.step(count)
+    def emu_over(self):
+        if not self.unicornEngine.is_active():
+            uemu_log("Emulator is not active")
+            return
+
+        if self.unicornEngine.is_running():
+            uemu_log("Emulator is running")
+            return
+
+        self.unicornEngine.over()
 
     def emu_stop(self):
         if not self.unicornEngine.is_active():
@@ -2139,13 +2173,24 @@ class uEmuPlugin(plugin_t, UI_Hooks):
         if ok == 1:
             address = memDumpDlg.mem_addr.value
             size = memDumpDlg.mem_size.value
-            strpath=os.path.dirname(idc.GetIdbPath()) + os.sep + "%X-%X.Dump"%(address, address + size)
-            filePath = IDAAPI_AskFile(1,  strpath, "Dump uemu memory")
-            if filePath is not None:
-                with open(filePath, 'w') as outfile:
-                    outfile.seek(0, 0)
-                    outfile.write(self.unicornEngine.get_mapped_bytes(address, size))
-                    outfile.close()
+            mem_type = memDumpDlg.cGroup2.value
+            if(0 == mem_type):
+                print("output addr:0x%08X, Size:0x%08X" % (address,size))
+                print("=========hex=========")
+                bytesbuffer = self.unicornEngine.get_mapped_bytes(address, size)
+                #print(bytes(bytesbuffer).encode('hex').upper())
+                print(''.join(['%02X' % b for b in bytesbuffer]))
+                print("=========end=========")
+            else:
+                strpath=os.path.dirname(idc.GetIdbPath()) + os.sep + "%X-%X.Dump"%(address, address + size)
+                filePath = IDAAPI_AskFile(1,  strpath, "Dump uemu memory")
+                if filePath is not None:
+                    print("Dump to file addr:0x%08X, Size:0x%08X" % (address,size))
+                    print('Dump path : ' + filePath)
+                    with open(filePath, 'w') as outfile:
+                        outfile.seek(0, 0)
+                        outfile.write(self.unicornEngine.get_mapped_bytes(address, size))
+                        outfile.close()
         else:
             print('cancel dump!')
     def patch_memory(self, address = 0):
