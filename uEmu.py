@@ -939,7 +939,7 @@ class uEmuControlView(PluginForm):
     def OnCreate(self, form):
         self.parent = self.FormToPyQtWidget(form)
         self.PopulateForm()
-
+    #### 下面这个函数 就是通过 QT 代码描绘ui界面,这里我们可以有很多自定义的操作;
     def PopulateForm(self):
         btnStart = QPushButton("Start")
         btnRun = QPushButton("Run")
