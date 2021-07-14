@@ -45,7 +45,7 @@ if IDA_SDK_VERSION >= 700:
     IDAAPI_AskYN        = ask_yn
     IDAAPI_AskFile      = ask_file
     IDAAPI_AskLong      = ask_long
-    IDAAPI_NextHead     = next_head
+    IDAAPI_NextHead     = idc.NextHead
     IDAAPI_GetDisasm    = lambda a, b: tag_remove(generate_disasm_line(a, b))
     IDAAPI_NextThat     = next_that
     IDAAPI_Jump         = jumpto
@@ -1508,7 +1508,7 @@ class uEmuUnicornEngine(object):
                 if ((not self.lastRegValueDir.has_key(reg_label)) or (currentValue != self.lastRegValueDir[reg_label])):
                     self.lastRegValueDir[reg_label] = currentValue
                     regvalues += value_format%(reg_label, currentValue)
-        bytes = IDAAPI_GetBytes(self.pc, IDAAPI_NextHead(self.pc) - self.pc)
+        bytes = IDAAPI_GetBytes(self.pc, idc.NextHead(self.pc) - self.pc)
         bytes_hex = UEMU_HELPERS.bytes_to_str(bytes)
         uemu_log("* TRACE<I> 0x%X | %-16s | %s | %s" % (self.pc, bytes_hex, IDAAPI_GetDisasm(self.pc, 0), regvalues))
 
@@ -1753,7 +1753,7 @@ class uEmuUnicornEngine(object):
                         self.emuRunning = False
                         return 1
 
-                    self.pc = IDAAPI_NextHead(self.pc)
+                    self.pc = idc.NextHead(self.pc)
                     uemu_log("! <U> Unable to emulate [ %s ] - SKIP to 0x%X" % (disasm, self.pc))
 
                 if self.emuStepCount != 1:
@@ -1803,7 +1803,7 @@ class uEmuUnicornEngine(object):
         ###  这里需要扩展一些别的汇编,比如 x86 的call 等
         arm_code = IDAAPI_GetDisasm(self.pc, 0).lower()
         if(self.isCallCode(arm_code)):
-            self.next_pc = IDAAPI_NextHead(self.pc)
+            self.next_pc = idc.NextHead(self.pc)
             self.step(self.kStepCount_Run)
         else:
             self.step()
