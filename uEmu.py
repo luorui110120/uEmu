@@ -20,11 +20,16 @@ import threading
 import json
 import os
 import collections
+import sys
 
 # IDA Python SDK
 from idaapi import *
 from idc import *
 from idautils import *
+
+import emu_api_hooks
+import emu_addr_hooks
+import struct
 
 if IDA_SDK_VERSION >= 700:
     # functions
@@ -45,12 +50,13 @@ if IDA_SDK_VERSION >= 700:
     IDAAPI_AskYN        = ask_yn
     IDAAPI_AskFile      = ask_file
     IDAAPI_AskLong      = ask_long
-    IDAAPI_NextHead     = idc.NextHead
+    IDAAPI_NextHead     = next_head
     IDAAPI_GetDisasm    = lambda a, b: tag_remove(generate_disasm_line(a, b))
     IDAAPI_NextThat     = next_that
     IDAAPI_Jump         = jumpto
     # classes
     IDAAPI_Choose       = Choose
+    IDAAPI_GetFuncName  = get_func_name
 else:
     # functions
     IDAAPI_ScreenEA     = ScreenEA
@@ -88,6 +94,27 @@ from unicorn.arm64_const import *
 from unicorn.mips_const import *
 from unicorn.x86_const import *
 
+
+
+
+def is_dic_key(indic, inkey):
+    if sys.version >'3':
+        return inkey in indic
+    else:
+        return indic.has_key(inkey)
+
+def bytesToHexString(bs):
+    if sys.version > '3':
+        return ''.join(['%02X' % b for b in bs])
+    else:
+        return bs.encode('hex')
+
+def hexStringTobytes(str):
+    if sys.version > '3':
+        str = str.replace(" ", "")
+        return bytes.fromhex(str)
+    else:
+        return str.decode('hex')
 
 # === Configuration
 
@@ -497,7 +524,7 @@ class UEMU_HELPERS:
                     t = get_sreg(ea, "T")  # get T flag
                 else:
                     t = get_segreg(ea, 20) # get T flag
-                return t is not BADSEL and t is not 0
+                return (t != BADSEL) and (t != 0)
             else:
                 return 0
         return UEMU_HELPERS.exec_on_main(handler, MFF_READ)
@@ -1226,6 +1253,9 @@ class uEmuUnicornEngine(object):
 
     fix_context     = None
     extended        = False
+    apiHooks        = {}
+    addrHooks       = {}
+    arch            = ''
 
     def __init__(self, owner):
         super(uEmuUnicornEngine, self).__init__()
@@ -1243,16 +1273,26 @@ class uEmuUnicornEngine(object):
             "mipsbe"    : [ UC_MIPS_REG_PC,     UC_ARCH_MIPS,   UC_MODE_MIPS32  | UC_MODE_BIG_ENDIAN    ],
             "mipsle"    : [ UC_MIPS_REG_PC,     UC_ARCH_MIPS,   UC_MODE_MIPS32  | UC_MODE_LITTLE_ENDIAN ],
         }
-        arch = UEMU_HELPERS.get_arch()
-        if(len(arch) <3):
+        self.arch = UEMU_HELPERS.get_arch()
+        if(len(self.arch) <3):
             return
         #print('arch', arch)
         self.lastRegValueDir={}
 
-        self.uc_reg_pc, self.uc_arch, self.uc_mode = uc_setup[arch]
+        self.uc_reg_pc, self.uc_arch, self.uc_mode = uc_setup[self.arch]
         uemu_log("Unicorn version [ %s ]" % (unicorn.__version__))
-        uemu_log("CPU arch set to [ %s ]" % (arch))
-
+        uemu_log("CPU arch set to [ %s ]" % (self.arch))
+        if self.arch.startswith("arm"):
+            for apikey in emu_api_hooks.exp_apiHooks:
+                eaaddr = idc.get_name_ea_simple(apikey)
+                if(eaaddr != BADADDR):
+                    self.apiHooks[eaaddr] = emu_api_hooks.exp_apiHooks[apikey]
+            for addrkey in emu_addr_hooks.exp_addrHooks:
+                eaaddr = int(addrkey, 16);
+                if(eaaddr != BADADDR):
+                    self.addrHooks[eaaddr] = emu_addr_hooks.exp_addrHooks[addrkey]
+        #['malloc'] = 
+    
     def is_active(self):
         return self.emuActive
 
@@ -1325,16 +1365,18 @@ class uEmuUnicornEngine(object):
             memEndAligned = UEMU_HELPERS.ALIGN_PAGE_UP(memEnd)
             uemu_log("  map [%X:%X] -> [%X:%X]" % (memStart, memEnd - 1, memStartAligned, memEndAligned - 1))
             self.mu.mem_map(memStartAligned, memEndAligned - memStartAligned)
+            return memStartAligned
         except UcError as e:
             uemu_log("! <U> %s" % e)
+        return None
 
     def map_empty(self, address, size):
         self.map_memory(address, size)
-        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * UEMU_CONFIG.UnicornPageSize)
+        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * size)
     
     def map_hex(self, address, size, bytesbuf):
         self.map_memory(address, size)
-        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * UEMU_CONFIG.UnicornPageSize)
+        self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), b"\x00" * size)
         self.mu.mem_write(UEMU_HELPERS.ALIGN_PAGE_DOWN(address), bytesbuf)
         return True
     def map_file(self,address, size, filepath):
@@ -1494,7 +1536,7 @@ class uEmuUnicornEngine(object):
             regList = UEMU_HELPERS.get_register_map(arch)
             retstr=''
             if ph.flag & PR_USE64:
-                value_format = "%s:0x%.16X"
+                value_format = "%s:0x%.16X,"
             else:
                 value_format = "%s:0x%.8X,"
             reg_cnt = len(regList)
@@ -1505,13 +1547,88 @@ class uEmuUnicornEngine(object):
                 if(self.uc_reg_pc == reg_key):
                     continue
                 currentValue = self.mu.reg_read(reg_key)
-                if ((not self.lastRegValueDir.has_key(reg_label)) or (currentValue != self.lastRegValueDir[reg_label])):
+                if ((not is_dic_key(self.lastRegValueDir, reg_label)) or (currentValue != self.lastRegValueDir[reg_label])):
                     self.lastRegValueDir[reg_label] = currentValue
                     regvalues += value_format%(reg_label, currentValue)
-        bytes = IDAAPI_GetBytes(self.pc, idc.NextHead(self.pc) - self.pc)
+        bytes = IDAAPI_GetBytes(self.pc, IDAAPI_NextHead(self.pc) - self.pc)
         bytes_hex = UEMU_HELPERS.bytes_to_str(bytes)
         uemu_log("* TRACE<I> 0x%X | %-16s | %s | %s" % (self.pc, bytes_hex, IDAAPI_GetDisasm(self.pc, 0), regvalues))
-
+    
+    def getReg(self, regstr):
+        reg_map = UEMU_HELPERS.get_register_map(self.arch)
+        for reg in reg_map:
+            if(reg[0] == regstr):
+                return reg[1] 
+        return None
+    def getRegValue(self, regstr):
+        return self.mu.reg_read(self.getReg(regstr))
+    def getArgv(self):
+        argv=[]
+        if self.arch.startswith("arm64"):
+            argv = [
+                self.getRegValue("X0"),
+                self.getRegValue("X1"),
+                self.getRegValue("X2"),
+                self.getRegValue("X3"),
+                self.getRegValue("X4"),
+                self.getRegValue("X5"),
+                self.getRegValue("X6"),
+                self.getRegValue("X7")]
+            
+        elif self.arch.startswith("arm"):
+            sp = self.getRegValue("SP")
+            argv = [
+                self.getRegValue("R0"),
+                self.getRegValue("R1"),
+                self.getRegValue("R2"),
+                self.getRegValue("R3"),
+                struct.unpack("<I", self.mu.mem_read(sp, 4))[0],
+                struct.unpack("<I", self.mu.mem_read(sp + 4, 4))[0],
+                struct.unpack("<I", self.mu.mem_read(sp + 8, 4))[0],
+                struct.unpack("<I", self.mu.mem_read(sp + 12, 4))[0]]
+        else:
+            argv = None
+        return argv
+    def getRetReg(self):
+        if self.arch.startswith("arm64"):
+            return self.getReg("X0")
+        elif self.arch.startswith("arm"):
+            return self.getReg("R0")
+        return None
+    def getRetAddr(self):
+        if self.arch.startswith("arm"):
+            return self.mu.reg_read(self.getReg("LR"))
+        return None
+    def getPcReg(self):
+        if self.arch.startswith("arm"):
+            return self.getReg("PC")
+        return None
+    def getEmuString(self, addr):
+        out = bytearray()
+        while self.mu.mem_read(addr, 1) != b"\x00":
+            out += self.mu.mem_read(addr, 1)
+            addr += 1
+        if sys.version > '3':
+            return  bytes.decode(bytes(out), encoding='utf8')
+        else:
+            return bytes(out)
+    def hook_compilation_code(self, uc, address, size, user_data):
+        if(address in self.apiHooks):
+            if IDA_SDK_VERSION >= 750:
+                uemu_log("new addr 0x%x" % (address))
+            else:
+                uemu_log("new addr 0x%x, name:%s" % (address, IDAAPI_GetFuncName(address)))
+            regret = self.apiHooks[address](self, address, self.getArgv(), size, user_data)
+            # self.map_memory(0x50000, 0x100)
+            # uemu_log("maps  0x%x" % 0x50000)
+            # self.mu.reg_write(self.getReg("R0"), 0x50000)
+            # uemu_log("mov  r0, #%x" % 0x50000)
+            if(None != regret):
+                self.mu.reg_write(self.getRetReg(), regret)
+            self.mu.reg_write(self.getReg("PC"), self.getRetAddr())
+        if(address in self.addrHooks):
+            uemu_log("hook addr 0x%x" % (address))
+            self.addrHooks[address](self, address, self.getArgv(), size, user_data)
     def hook_mem_access(self, uc, access, address, size, value, user_data):
         def bpt_sync_check():
             return 1 if self.is_breakpoint_reached(address) else 0
@@ -1641,6 +1758,7 @@ class uEmuUnicornEngine(object):
         self.mu = Uc(self.uc_arch, self.uc_mode)
         self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, self.hook_mem_invalid)
         self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.hook_mem_access)
+        self.mu.hook_add(UC_HOOK_CODE, self.hook_compilation_code)
         self.pc = address
         ### 获取下一条指令的地址
         self.next_pc = None
@@ -1753,7 +1871,7 @@ class uEmuUnicornEngine(object):
                         self.emuRunning = False
                         return 1
 
-                    self.pc = idc.NextHead(self.pc)
+                    self.pc = IDAAPI_NextHead(self.pc)
                     uemu_log("! <U> Unable to emulate [ %s ] - SKIP to 0x%X" % (disasm, self.pc))
 
                 if self.emuStepCount != 1:
@@ -1803,7 +1921,7 @@ class uEmuUnicornEngine(object):
         ###  这里需要扩展一些别的汇编,比如 x86 的call 等
         arm_code = IDAAPI_GetDisasm(self.pc, 0).lower()
         if(self.isCallCode(arm_code)):
-            self.next_pc = idc.NextHead(self.pc)
+            self.next_pc = IDAAPI_NextHead(self.pc)
             self.step(self.kStepCount_Run)
         else:
             self.step()
@@ -2263,7 +2381,7 @@ class uEmuPlugin(plugin_t, UI_Hooks):
             mem_hex = mem_hex.strip().replace(' ','').replace('\n','').replace('\r','').replace('\t','')
             # def map_write(self, address, bytesbuf):
             # self.mu.mem_write(address, bytesbuf)
-            self.unicornEngine.mu.mem_write(mem_addr, mem_hex.decode('hex'))
+            self.unicornEngine.mu.mem_write(mem_addr, hexStringTobytes(mem_hex))
             self.refresh_all_memory_views()
     def show_memory(self, address = 0, size = 0x100):
         if not self.unicornEngine.is_active():
@@ -2299,7 +2417,7 @@ class uEmuPlugin(plugin_t, UI_Hooks):
                     if(1 == mem_type):
                         ###处理不可见字符串
                         mem_hex = mem_hex.strip().replace(' ','').replace('\n','').replace('\r','').replace('\t','')
-                        if not self.unicornEngine.map_hex(mem_addr, mem_size, mem_hex.decode('hex')):
+                        if not self.unicornEngine.map_hex(mem_addr, mem_size, hexStringTobytes(mem_hex)):
                             return 
                     if(2 == mem_type):
                         mem_size = self.unicornEngine.map_file(mem_addr, mem_size, mem_file_path)

@@ -195,3 +195,9 @@ Please find description with example [here](./Extensions/README.md)
 
 
 
+## 添加 demo 例子, 并对简单的 malloc, stcmp, strlen 等函数进行了处理;
+## 对某个地址上的代码进行处理,方便跳过等操作
+emu_addr_hooks.py
+
+## 补libc.so 的处理函数
+emu_api_hooks.py
