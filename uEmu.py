@@ -1581,11 +1581,16 @@ class uEmuUnicornEngine(object):
                 self.getRegValue("R0"),
                 self.getRegValue("R1"),
                 self.getRegValue("R2"),
-                self.getRegValue("R3"),
-                struct.unpack("<I", self.mu.mem_read(sp, 4))[0],
-                struct.unpack("<I", self.mu.mem_read(sp + 4, 4))[0],
-                struct.unpack("<I", self.mu.mem_read(sp + 8, 4))[0],
-                struct.unpack("<I", self.mu.mem_read(sp + 12, 4))[0]]
+                self.getRegValue("R3"),]
+            for i in range(4):
+                if(self.is_memory_mapped(sp + i * 4)):
+                    argv.append(struct.unpack("<I", self.mu.mem_read(sp + i * 4, 4))[0])
+                else:
+                    break
+                # struct.unpack("<I", self.mu.mem_read(sp, 4))[0],
+                # struct.unpack("<I", self.mu.mem_read(sp + 4, 4))[0],
+                # struct.unpack("<I", self.mu.mem_read(sp + 8, 4))[0],
+                # struct.unpack("<I", self.mu.mem_read(sp + 12, 4))[0]]
         else:
             argv = None
         return argv
